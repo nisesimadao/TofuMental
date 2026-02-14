@@ -1,4 +1,4 @@
-# TofuMental
+# TofuMental[^title]
 ### ‼️バイブコーディング‼️
 
 SHARP Brain 電子辞書向けの、工業的な美学と人間中心設計を融合させた Todo アプリです。
@@ -32,3 +32,5 @@ SHARP Brain 電子辞書向けの、工業的な美学と人間中心設計を�
 
 ## 開発環境
 Antigravity,VSCode,CeGCC
+
+[^title]: この意味わからん名前の由来は僕がプロジェクトを作るときにTodoをTofuにタイポしたことです
