@@ -67,29 +67,73 @@ RECT clientRect;
 HFONT hFontMain = NULL;
 HFONT hFontDot = NULL;
 
+// --- Animation Globals ---
+double visualScrollPos = 0.0;
+double targetScrollPos = 0.0;
+double startScrollPos = 0.0;
+DWORD animStartTime = 0;
+const int ANIM_DURATION = 350; // ms
+bool isAnimating = false;
+
 // --- Persistence ---
 
-void SaveTasks() {
-    FILE* fp = _wfopen(L"tasks.txt", L"w, ccs=UTF-16LE");
-    if (!fp) return;
-    for (size_t i = 0; i < tasks.size(); ++i) {
-        fwprintf(fp, L"%ls|%d\n", tasks[i].title.c_str(), tasks[i].completed ? 1 : 0);
+std::wstring GetAppDir() {
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(NULL, path, MAX_PATH);
+    std::wstring ws(path);
+    size_t pos = ws.find_last_of(L"\\/");
+    if (pos != std::wstring::npos) {
+        return ws.substr(0, pos + 1);
     }
-    fclose(fp);
+    return L"";
+}
+
+void SaveTasks() {
+    std::wstring path = GetAppDir() + L"tasks.txt";
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return;
+
+    // Write UTF-16LE BOM
+    unsigned short bom = 0xFEFF;
+    DWORD written;
+    WriteFile(hFile, &bom, 2, &written, NULL);
+
+    for (size_t i = 0; i < tasks.size(); ++i) {
+        std::wstring line = tasks[i].title + L"|" + (tasks[i].completed ? L"1" : L"0") + L"\r\n";
+        WriteFile(hFile, line.c_str(), (DWORD)(line.length() * sizeof(wchar_t)), &written, NULL);
+    }
+    CloseHandle(hFile);
 }
 
 void LoadTasks() {
-    FILE* fp = _wfopen(L"tasks.txt", L"r, ccs=UTF-16LE");
-    if (!fp) {
-        // Default tasks if file doesn't exist
+    std::wstring path = GetAppDir() + L"tasks.txt";
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        // Default tasks
         tasks.push_back(Task(L"Eat Tofu"));
         tasks.push_back(Task(L"Stay Mental"));
         tasks.push_back(Task(L"Build PW-SH2 Apps"));
         return;
     }
+
+    DWORD fileSize = GetFileSize(hFile, NULL);
+    if (fileSize <= 2) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    wchar_t* buffer = new wchar_t[fileSize / 2 + 1];
+    DWORD read;
+    ReadFile(hFile, buffer, fileSize, &read, NULL);
+    CloseHandle(hFile);
+
+    buffer[read / 2] = L'\0';
+    wchar_t* start = buffer;
+    if (*start == 0xFEFF) start++; // Skip BOM
+
     tasks.clear();
-    wchar_t line[256];
-    while (fgetws(line, 256, fp)) {
+    wchar_t* line = wcstok(start, L"\r\n");
+    while (line) {
         std::wstring ws(line);
         size_t sep = ws.find_last_of(L'|');
         if (sep != std::wstring::npos) {
@@ -98,8 +142,10 @@ void LoadTasks() {
             tasks.push_back(Task(title));
             tasks.back().completed = completed;
         }
+        line = wcstok(NULL, L"\r\n");
     }
-    fclose(fp);
+    delete[] buffer;
+    targetScrollPos = visualScrollPos = 0.0;
 }
 
 // --- UI Helpers ---
@@ -130,6 +176,27 @@ void InitApp() {
     LoadTasks();
 }
 
+// --- Animation Helper ---
+
+void StartScrollAnimation(int newIdx, HWND hWnd) {
+    if (tasks.empty()) return;
+    
+    double startPos = visualScrollPos;
+    double targetPos = (double)newIdx;
+
+    // Shortest path logic for infinite loop
+    double diff = targetPos - startPos;
+    int n = (int)tasks.size();
+    if (diff > n / 2.0) targetPos -= n;
+    else if (diff < -n / 2.0) targetPos += n;
+
+    targetScrollPos = targetPos;
+    startScrollPos = startPos;
+    animStartTime = GetTickCount();
+    isAnimating = true;
+    SetTimer(hWnd, 1, 16, NULL); // ~60fps
+}
+
 // --- Window Procedure ---
 
 LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -156,31 +223,69 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             break;
         }
 
+        case WM_TIMER: {
+            if (isAnimating) {
+                DWORD elapsed = GetTickCount() - animStartTime;
+                double t = (double)elapsed / ANIM_DURATION;
+                if (t >= 1.0) {
+                    t = 1.0;
+                    isAnimating = false;
+                    KillTimer(hWnd, 1);
+                    visualScrollPos = targetScrollPos;
+                    // Normalize only at the very end
+                    double n = (double)tasks.size();
+                    while (visualScrollPos < 0) visualScrollPos += n;
+                    while (visualScrollPos >= n) visualScrollPos -= n;
+                    targetScrollPos = visualScrollPos;
+                    // Ensure selectedIndex matches
+                    selectedIndex = (int)round(visualScrollPos);
+                    while (selectedIndex < 0) selectedIndex += (int)tasks.size();
+                    while (selectedIndex >= (int)tasks.size()) selectedIndex -= (int)tasks.size();
+                } else {
+                    double easedT = 1.0 - pow(1.0 - t, 3);
+                    visualScrollPos = startScrollPos + (targetScrollPos - startScrollPos) * easedT;
+                }
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            break;
+        }
+
         case WM_SIZE:
             GetClientRect(hWnd, &clientRect);
             InvalidateRect(hWnd, NULL, TRUE);
             break;
 
         case WM_LBUTTONDOWN: {
+            if (tasks.empty()) break;
             int x = (int)(short)LOWORD(lParam);
             int y = (int)(short)HIWORD(lParam);
             
-            int currentY = MARGIN_Y;
-            for (int i = 0; i < (int)tasks.size(); ++i) {
-                RECT itemRect = { MARGIN_X, currentY, clientRect.right - MARGIN_X, currentY + ITEM_HEIGHT };
-                if (x >= itemRect.left && x <= itemRect.right && y >= itemRect.top && y <= itemRect.bottom) {
-                    selectedIndex = i;
-                    // Check if tapped on the left indicator or title
-                    if (x < itemRect.left + GRID_UNIT * 4) {
-                        tasks[i].completed = !tasks[i].completed;
-                        SaveTasks();
-                    }
-                    InvalidateRect(hWnd, NULL, FALSE);
-                    return 0;
-                }
-                currentY += ITEM_HEIGHT + 2;
+            RECT rect;
+            GetClientRect(hWnd, &rect);
+            int centerY = rect.bottom / 2;
+            int spacing = ITEM_HEIGHT + 2;
+
+            int dy = y - centerY;
+            int slotOffset = (dy >= 0) ? (dy + spacing / 2) / spacing : (dy - spacing / 2) / spacing;
+            
+            // Logic: target exactly what was tapped visually (including lap)
+            double newVisualTarget = visualScrollPos + slotOffset;
+            int newIdx = ((int)round(newVisualTarget) % (int)tasks.size() + (int)tasks.size()) % (int)tasks.size();
+            
+            if (slotOffset == 0 && x >= MARGIN_X && x < MARGIN_X + GRID_UNIT * 5) {
+                tasks[newIdx].completed = !tasks[newIdx].completed;
+                SaveTasks();
+                InvalidateRect(hWnd, NULL, FALSE);
+            } else {
+                selectedIndex = newIdx;
+                // Directly animate to the visual location tapped
+                targetScrollPos = newVisualTarget;
+                startScrollPos = visualScrollPos;
+                animStartTime = GetTickCount();
+                isAnimating = true;
+                SetTimer(hWnd, 1, 16, NULL);
             }
-            break;
+            return 0;
         }
 
         case WM_CHAR:
@@ -202,14 +307,15 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
         case WM_KEYDOWN:
             if (currentMode == MODE_LIST) {
+                if (tasks.empty() && wParam != 'A' && wParam != VK_ESCAPE) break;
                 switch (wParam) {
                     case VK_UP:
                         selectedIndex = (selectedIndex <= 0) ? (int)tasks.size() - 1 : selectedIndex - 1;
-                        InvalidateRect(hWnd, NULL, FALSE);
+                        StartScrollAnimation(selectedIndex, hWnd);
                         break;
                     case VK_DOWN:
                         selectedIndex = (selectedIndex >= (int)tasks.size() - 1) ? 0 : selectedIndex + 1;
-                        InvalidateRect(hWnd, NULL, FALSE);
+                        StartScrollAnimation(selectedIndex, hWnd);
                         break;
                     case VK_RETURN:
                         if (selectedIndex >= 0 && selectedIndex < (int)tasks.size()) {
@@ -222,6 +328,7 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                         tasks.push_back(Task(L""));
                         selectedIndex = (int)tasks.size() - 1;
                         currentMode = MODE_ADD;
+                        visualScrollPos = targetScrollPos = (double)selectedIndex; // Snap for add
                         InvalidateRect(hWnd, NULL, FALSE);
                         break;
                     case 'D': // Delete
@@ -230,6 +337,7 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                             tasks.erase(tasks.begin() + selectedIndex);
                             if (selectedIndex >= (int)tasks.size()) selectedIndex = (int)tasks.size() - 1;
                             if (selectedIndex < 0) selectedIndex = 0; // Handle case where all tasks are deleted
+                            visualScrollPos = targetScrollPos = (double)selectedIndex;
                             SaveTasks();
                             InvalidateRect(hWnd, NULL, TRUE);
                         }
@@ -246,6 +354,7 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                         selectedIndex = (int)tasks.size() - 1;
                         if (selectedIndex < 0) selectedIndex = 0;
                     }
+                    visualScrollPos = targetScrollPos = (double)selectedIndex;
                     InvalidateRect(hWnd, NULL, TRUE);
                 }
             }
@@ -258,7 +367,6 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
 
-            // Re-fetch client rect to ensure we never have 0 size if possible
             RECT rect;
             GetClientRect(hWnd, &rect);
             if (rect.right == 0 || rect.bottom == 0) {
@@ -266,68 +374,102 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 return 0;
             }
 
-            // Double Buffering
             HDC hdcMem = CreateCompatibleDC(hdc);
             HBITMAP hbmMem = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
             HBITMAP hbmOld = (HBITMAP)SelectObject(hdcMem, hbmMem);
 
-            // 1. Background (Pure Nothing Black)
             HBRUSH bgBrush = CreateSolidBrush(CLR_BG);
             FillRect(hdcMem, &rect, bgBrush);
             DeleteObject(bgBrush);
 
-            // 2. Header (Nothing OS Dot-Matrix Style)
             SelectObject(hdcMem, hFontDot);
             SetTextColor(hdcMem, CLR_TEXT_PRI);
             SetBkMode(hdcMem, TRANSPARENT);
             RECT headerRect = { MARGIN_X, MARGIN_Y / 2, rect.right - MARGIN_X, MARGIN_Y };
             DrawText(hdcMem, (currentMode == MODE_ADD) ? TEXT("::: NEW TASK :::") : TEXT("::: TOFU MENTAL :::"), -1, &headerRect, DT_LEFT | DT_BOTTOM);
 
-            // 3. Task List (Apple HIG Layout)
-            int currentY = MARGIN_Y;
-            for (int i = 0; i < (int)tasks.size(); ++i) {
-                RECT itemRect = { MARGIN_X, currentY, rect.right - MARGIN_X, currentY + ITEM_HEIGHT };
+            if (!tasks.empty()) {
+                int centerY = rect.bottom / 2;
+                int spacing = ITEM_HEIGHT + 2;
+                int halfItem = ITEM_HEIGHT / 2;
                 
-                // Selection Highlight (LiquidGlass Simulation)
-                if (i == selectedIndex) {
-                    // Draw a subtle rounded rect for selection
-                    COLORREF highlightCol = (currentMode == MODE_ADD) ? RGB(60,20,20) : RGB(30,30,30);
-                    DrawRoundedRect(hdcMem, itemRect, CORNER_RADIUS, CLR_GLASS_BORDER, highlightCol);
-                }
+                double rangeJ = (double)rect.bottom / spacing / 2.0 + 1.5;
+                int startJ = (int)floor(visualScrollPos - rangeJ);
+                int endJ = (int)ceil(visualScrollPos + rangeJ);
+                int n = (int)tasks.size();
 
-                // Checkbox / Dot Indicator
-                RECT checkRect = { itemRect.left + GRID_UNIT, itemRect.top + GRID_UNIT, 
-                                   itemRect.left + GRID_UNIT * 3, itemRect.top + ITEM_HEIGHT - GRID_UNIT };
-                
-                if (tasks[i].completed) {
-                    HBRUSH hBr = CreateSolidBrush(CLR_TEXT_PRI);
-                    HBRUSH hOldB = (HBRUSH)SelectObject(hdcMem, hBr);
-                    Ellipse(hdcMem, checkRect.left + 4, checkRect.top + 12, checkRect.right - 4, checkRect.bottom - 12);
-                    SelectObject(hdcMem, hOldB);
-                    DeleteObject(hBr);
-                } else {
-                    HPEN hPen = CreatePen(PS_SOLID, 1, CLR_TEXT_SEC);
-                    HPEN hOldP = (HPEN)SelectObject(hdcMem, hPen);
-                    SelectObject(hdcMem, GetStockObject(NULL_BRUSH));
-                    Ellipse(hdcMem, checkRect.left + 4, checkRect.top + 12, checkRect.right - 4, checkRect.bottom - 12);
-                    SelectObject(hdcMem, hOldP);
-                    DeleteObject(hPen);
-                }
+                // Draw Stationary Focus Frame
+                RECT focusRect = { MARGIN_X, centerY - halfItem, rect.right - MARGIN_X, centerY - halfItem + ITEM_HEIGHT };
+                COLORREF highlightCol = (currentMode == MODE_ADD) ? RGB(60,20,20) : RGB(30,30,30);
+                DrawRoundedRect(hdcMem, focusRect, CORNER_RADIUS, CLR_GLASS_BORDER, highlightCol);
 
-                // Task Text
-                SelectObject(hdcMem, hFontMain);
-                SetTextColor(hdcMem, tasks[i].completed ? CLR_TEXT_SEC : CLR_TEXT_PRI);
-                std::wstring displayText = tasks[i].title;
-                if (i == selectedIndex && currentMode == MODE_ADD && (GetTickCount() / 500) % 2 == 0) {
-                    displayText += L"_"; // Blinking cursor
-                }
-                RECT textRect = { itemRect.left + GRID_UNIT * 5, itemRect.top, itemRect.right, itemRect.bottom };
-                DrawText(hdcMem, displayText.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                for (int j = startJ; j <= endJ; ++j) {
+                    int i = (j % n + n) % n;
+                    int itemTop = (int)(centerY - halfItem + (j - visualScrollPos) * spacing);
+                    RECT itemRect = { MARGIN_X, itemTop, rect.right - MARGIN_X, itemTop + ITEM_HEIGHT };
 
-                currentY += ITEM_HEIGHT + 2; // Subtle gap
+                    // Seam Separator (between j=k*n-1 and j=k*n)
+                    if ((j % n == n - 1) && n > 1) {
+                        int seamY = itemTop + ITEM_HEIGHT + 1;
+                        if (seamY > MARGIN_Y && seamY < rect.bottom - MARGIN_Y) {
+                            HPEN hSeamPen = CreatePen(PS_SOLID, 1, RGB(60, 60, 60));
+                            HPEN hOldP = (HPEN)SelectObject(hdcMem, hSeamPen);
+                            MoveToEx(hdcMem, MARGIN_X, seamY, NULL); LineTo(hdcMem, rect.right - MARGIN_X, seamY);
+                            for (int dx = MARGIN_X; dx < rect.right - MARGIN_X; dx += 8) {
+                                SetPixel(hdcMem, dx, seamY - 2, CLR_TEXT_SEC); SetPixel(hdcMem, dx, seamY + 2, CLR_TEXT_SEC);
+                            }
+                            SelectObject(hdcMem, hOldP); DeleteObject(hSeamPen);
+                        }
+                    }
+
+
+
+                    if (itemTop + ITEM_HEIGHT < 0 || itemTop > rect.bottom) continue;
+
+                    // Indicator
+                    RECT checkRect = { itemRect.left + GRID_UNIT, itemRect.top + GRID_UNIT, 
+                                       itemRect.left + GRID_UNIT * 3, itemRect.top + ITEM_HEIGHT - GRID_UNIT };
+                    
+                    if (tasks[i].completed) {
+                        HBRUSH hBr = CreateSolidBrush(CLR_TEXT_PRI);
+                        HBRUSH hOldB = (HBRUSH)SelectObject(hdcMem, hBr);
+                        Ellipse(hdcMem, checkRect.left + 4, checkRect.top + 12, checkRect.right - 4, checkRect.bottom - 12);
+                        SelectObject(hdcMem, hOldB);
+                        DeleteObject(hBr);
+                    } else {
+                        HPEN hPen = CreatePen(PS_SOLID, 1, CLR_TEXT_SEC);
+                        HPEN hOldP = (HPEN)SelectObject(hdcMem, hPen);
+                        SelectObject(hdcMem, GetStockObject(NULL_BRUSH));
+                        Ellipse(hdcMem, checkRect.left + 4, checkRect.top + 12, checkRect.right - 4, checkRect.bottom - 12);
+                        SelectObject(hdcMem, hOldP);
+                        DeleteObject(hPen);
+                    }
+
+                    // Text
+                    SelectObject(hdcMem, hFontMain);
+                    // Fade based on distance from screen center
+                    int distFromCenter = abs(itemTop + halfItem - centerY);
+                    int alpha = 255 - (distFromCenter * 255 / centerY);
+                    if (alpha < 40) alpha = 40;
+                    if (alpha > 255) alpha = 255;
+
+                    COLORREF baseCol = tasks[i].completed ? CLR_TEXT_SEC : CLR_TEXT_PRI;
+                    COLORREF fadedCol = RGB(GetRValue(baseCol) * alpha / 255, GetGValue(baseCol) * alpha / 255, GetBValue(baseCol) * alpha / 255);
+                    
+                    // Focused: virtual index j is the one closest to visualScrollPos
+                    bool isFocused = (j == (int)floor(visualScrollPos + 0.5));
+                    SetTextColor(hdcMem, isFocused ? baseCol : fadedCol);
+
+                    std::wstring displayText = tasks[i].title;
+                    if (isFocused && currentMode == MODE_ADD && (GetTickCount() / 500) % 2 == 0) {
+                        displayText += L"_";
+                    }
+                    RECT textRect = { itemRect.left + GRID_UNIT * 5, itemRect.top, itemRect.right, itemRect.bottom };
+                    DrawText(hdcMem, displayText.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                }
             }
 
-            // 4. Footer / Meta (Nothing OS)
+            // Footer
             SelectObject(hdcMem, hFontDot);
             SetTextColor(hdcMem, CLR_TEXT_SEC);
             TCHAR footerText[64];
@@ -336,10 +478,7 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             RECT footerRect = { MARGIN_X, rect.bottom - 20, rect.right - MARGIN_X, rect.bottom - 5 };
             DrawText(hdcMem, footerText, -1, &footerRect, DT_RIGHT | DT_SINGLELINE);
 
-            // Blit to screen
             BitBlt(hdc, 0, 0, rect.right, rect.bottom, hdcMem, 0, 0, SRCCOPY);
-
-            // Cleanup
             SelectObject(hdcMem, hbmOld);
             DeleteObject(hbmMem);
             DeleteDC(hdcMem);
