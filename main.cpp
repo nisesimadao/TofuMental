@@ -382,11 +382,7 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             FillRect(hdcMem, &rect, bgBrush);
             DeleteObject(bgBrush);
 
-            SelectObject(hdcMem, hFontDot);
-            SetTextColor(hdcMem, CLR_TEXT_PRI);
             SetBkMode(hdcMem, TRANSPARENT);
-            RECT headerRect = { MARGIN_X, MARGIN_Y / 2, rect.right - MARGIN_X, MARGIN_Y };
-            DrawText(hdcMem, (currentMode == MODE_ADD) ? TEXT("::: NEW TASK :::") : TEXT("::: TOFU MENTAL :::"), -1, &headerRect, DT_LEFT | DT_BOTTOM);
 
             if (!tasks.empty()) {
                 int centerY = rect.bottom / 2;
@@ -468,6 +464,13 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     DrawText(hdcMem, displayText.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                 }
             }
+
+            // Header
+            SelectObject(hdcMem, hFontDot);
+            SetTextColor(hdcMem, CLR_TEXT_PRI);
+            SetBkMode(hdcMem, TRANSPARENT);
+            RECT headerRect = { MARGIN_X, MARGIN_Y / 2, rect.right - MARGIN_X, MARGIN_Y };
+            DrawText(hdcMem, (currentMode == MODE_ADD) ? TEXT("::: NEW TASK :::") : TEXT("::: TOFU MENTAL :::"), -1, &headerRect, DT_LEFT | DT_BOTTOM);
 
             // Footer
             SelectObject(hdcMem, hFontDot);
