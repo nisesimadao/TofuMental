@@ -517,9 +517,15 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdL
 
     if (!RegisterClass(&wcl)) return FALSE;
 
+#ifdef UNDER_CE
     HWND hWnd = CreateWindowEx(0, TEXT("TofuMental"), TEXT("TofuMental"), WS_POPUP | WS_VISIBLE,
                                0, 0, CW_USEDEFAULT, CW_USEDEFAULT, 
                                NULL, NULL, hInstance, NULL);
+#else
+    HWND hWnd = CreateWindowEx(0, TEXT("TofuMental"), TEXT("TofuMental"), WS_OVERLAPPEDWINDOW,
+                               CW_USEDEFAULT, CW_USEDEFAULT, 480, 272, // Typical Sharp Brain resolution for testing
+                               NULL, NULL, hInstance, NULL);
+#endif
 
     if (!hWnd) return FALSE;
 
