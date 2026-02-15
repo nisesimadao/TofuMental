@@ -1,4 +1,5 @@
 # TofuMental[^title]
+### ‼️バイブコーディング‼️
 
 SHARP Brain 電子辞書向けの、工業的な美学と人間中心設計を融合させた Todo アプリです。
 
